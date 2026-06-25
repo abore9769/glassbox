@@ -341,6 +341,11 @@ The debug command returns explicit, actionable errors for all common failure mod
 | Simulator not found | `simulator binary not found` — run `glassbox doctor --fix` |
 | Simulation failure | `simulation execution failed: <detail>` — check the diagnostic section of the output |
 | No simulation results | `no simulation results generated` — indicates an internal logic error |
+| Snapshot fingerprint mismatch | `snapshot fingerprint mismatch: stored=… computed=…` — re-run the debug command to regenerate the snapshot |
+| Snapshot tx hash mismatch | `snapshot tx hash mismatch: snapshot contains tx=… but replay requested tx=…` |
+| Snapshot network mismatch | `snapshot network mismatch: snapshot was captured on "…" but replay is targeting "…"` |
+| Snapshot is stale | `snapshot is stale: CLI parameters have changed since the snapshot was saved` — regenerate with the current flags |
+| Empty trace (no events) | A note is printed to stderr explaining possible causes and suggesting `glassbox doctor --fix` |
 
 For environment setup problems, run `glassbox doctor` for a comprehensive health check.
 
