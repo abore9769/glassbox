@@ -215,6 +215,7 @@ func runDebugDryRun(cmd *cobra.Command, txHash string) error {
 				} else {
 					fmt.Fprintf(out, "[OK]   Source alias file: %s (%d mapping(s))\n", sourceAliasFlag, len(aliasMap))
 				}
+				fmt.Fprintf(out, "[OK]   Source alias file: %s (%d mapping(s))\n", sourceAliasFlag, len(aliasMap))
 			}
 		}
 	}
