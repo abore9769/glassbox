@@ -445,16 +445,22 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 		limit = 50
 	}
 
-	query := `
+	queryBase := `
 	SELECT id, name, created_at, last_access_at, status, network, horizon_url, tx_hash,
 	       envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 	       sim_request_json, sim_response_json, env_fingerprint, GLASSBOX_version, schema_version
 	FROM sessions
 	ORDER BY last_access_at DESC
-	LIMIT ?
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, limit)
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		query := queryBase + "LIMIT ?"
+		rows, err = s.db.QueryContext(ctx, query, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, queryBase)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sessions: %w", err)
 	}
