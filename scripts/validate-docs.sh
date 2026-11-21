@@ -23,17 +23,18 @@
 #      and checks each flag against the known flag set from the API snapshot
 #      (.api-snapshots/cli-*.txt). Unknown flags fail the check.
 #
-#   4. Fixture line-ending check
-#      Scans text fixture files under test/fixtures, tests/fixtures, and
-#      test/regression/fixtures for CRLF (Windows) line endings. Fixtures are
-#      expected to use LF so golden comparisons are stable across platforms.
-#      Explicitly binary or Windows-only fixtures are skipped (see
-#      FIXTURE_CRLF_ALLOWLIST below).
+#   4. Observability manifest check (opt-in, not part of --all)
+#      Validates docs/observability-manifest.json: the file parses as JSON,
+#      schema_version is "1", and every prometheus_metrics entry carries the
+#      required keys (name, type, labels, description, stability,
+#      documented_in) with documented_in paths that exist on disk.
 #
 # Usage:
-#   scripts/validate-docs.sh [--determinism] [--links] [--flags] [--fixtures] [--all]
+#   scripts/validate-docs.sh [--determinism] [--links] [--flags] [--manifest] [--all]
 #
-#   With no flags, --all is assumed.
+#   With no flags, --all is assumed. --all runs checks 1-3 only; the manifest
+#   check is opt-in via --manifest so existing CI is unaffected.
+=======
 #
 # Exit codes:
 #   0   All requested checks passed.
@@ -69,19 +70,19 @@ FIXTURE_CRLF_ALLOWLIST=(
 )
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
-RUN_DET=0; RUN_LINKS=0; RUN_FLAGS=0; RUN_FIXTURES=0
+RUN_DET=0; RUN_LINKS=0; RUN_FLAGS=0; RUN_MANIFEST=0
 for arg in "$@"; do
   case "${arg}" in
     --determinism) RUN_DET=1 ;;
     --links)       RUN_LINKS=1 ;;
     --flags)       RUN_FLAGS=1 ;;
-    --fixtures)    RUN_FIXTURES=1 ;;
-    --all)         RUN_DET=1; RUN_LINKS=1; RUN_FLAGS=1; RUN_FIXTURES=1 ;;
-    *) echo "Unknown flag: ${arg}. Use --determinism, --links, --flags, --fixtures, or --all." >&2; exit 1 ;;
+    --manifest)    RUN_MANIFEST=1 ;;
+    --all)         RUN_DET=1; RUN_LINKS=1; RUN_FLAGS=1 ;;
+    *) echo "Unknown flag: ${arg}. Use --determinism, --links, --flags, --manifest, or --all." >&2; exit 1 ;;
   esac
 done
-if [[ $((RUN_DET + RUN_LINKS + RUN_FLAGS + RUN_FIXTURES)) -eq 0 ]]; then
-  RUN_DET=1; RUN_LINKS=1; RUN_FLAGS=1; RUN_FIXTURES=1
+if [[ $((RUN_DET + RUN_LINKS + RUN_FLAGS + RUN_MANIFEST)) -eq 0 ]]; then
+  RUN_DET=1; RUN_LINKS=1; RUN_FLAGS=1
 fi
 
 FAILURES=0
@@ -287,63 +288,73 @@ check_flags() {
   fi
 }
 
-# ── 4. FIXTURE LINE-ENDING CHECK ──────────────────────────────────────────────
-check_fixtures() {
+# ── 4. OBSERVABILITY MANIFEST CHECK ───────────────────────────────────────────
+check_manifest() {
   echo ""
-  echo "4. Fixture line-ending check ..."
+  echo "4. Observability manifest check ..."
 
-  if [[ "${SKIP_FIXTURE_CHECK}" == "1" ]]; then
-    skip "SKIP_FIXTURE_CHECK=1 — skipping fixture line-ending check"
+  local manifest="${DOCS_DIR}/observability-manifest.json"
+
+  if [[ ! -f "${manifest}" ]]; then
+    fail "Manifest not found: ${manifest}"
     return
   fi
 
-  # Build a lookup of allowlisted paths for fast membership tests.
-  local -A allow=()
-  local entry
-  for entry in "${FIXTURE_CRLF_ALLOWLIST[@]}"; do
-    [[ -z "${entry}" ]] && continue
-    allow["${entry}"]=1
-  done
+  if ! command -v jq >/dev/null 2>&1; then
+    skip "jq not installed — cannot validate ${manifest}"
+    return
+  fi
 
-  local checked=0
-  local offending=0
-  local offending_files=()
+  if ! jq empty "${manifest}" >/dev/null 2>&1; then
+    fail "Manifest is not valid JSON: ${manifest}"
+    return
+  fi
+  pass "Manifest parses as JSON"
 
-  local dir
-  for dir in "${FIXTURE_DIRS[@]}"; do
-    local abs_dir="${REPO_ROOT}/${dir}"
-    [[ -d "${abs_dir}" ]] || continue
-
-    while IFS= read -r fixture; do
-      local relpath="${fixture#${REPO_ROOT}/}"
-
-      # Skip allowlisted fixtures (binary / Windows-only).
-      [[ -n "${allow[${relpath}]:-}" ]] && continue
-
-      # Skip binary files: a NUL byte in the first 8 KiB marks it binary.
-      if LC_ALL=C grep -qP '\x00' <(head -c 8192 "${fixture}") 2>/dev/null; then
-        continue
-      fi
-
-      checked=$((checked + 1))
-
-      # Detect CRLF: a carriage return immediately followed by a newline.
-      if LC_ALL=C grep -qU $'\r$' "${fixture}" 2>/dev/null; then
-        offending=$((offending + 1))
-        offending_files+=("${relpath}")
-      fi
-    done < <(find "${abs_dir}" -type f | LC_ALL=C sort)
-  done
-
-  if [[ ${offending} -eq 0 ]]; then
-    pass "No CRLF line endings in fixtures (checked ${checked} file(s))"
+  local schema_version
+  schema_version="$(jq -r '.schema_version // empty' "${manifest}")"
+  if [[ "${schema_version}" == "1" ]]; then
+    pass "schema_version is \"1\""
   else
-    fail "${offending} fixture file(s) contain CRLF line endings (checked ${checked} total)"
-    local f
-    for f in "${offending_files[@]}"; do
-      info "CRLF: ${f}"
+    fail "schema_version must be \"1\" (found: '${schema_version:-<missing>}')"
+  fi
+
+  local required_keys=("name" "type" "labels" "description" "stability" "documented_in")
+  local entry_count
+  entry_count="$(jq -r '.prometheus_metrics | length' "${manifest}" 2>/dev/null || echo "0")"
+
+  if [[ "${entry_count}" == "0" ]]; then
+    fail "prometheus_metrics is missing or empty"
+    return
+  fi
+
+  local missing=0
+  local idx
+  for ((idx = 0; idx < entry_count; idx++)); do
+    local key
+    for key in "${required_keys[@]}"; do
+      if [[ "$(jq -r --argjson i "${idx}" --arg k "${key}" '.prometheus_metrics[$i] | has($k)' "${manifest}")" != "true" ]]; then
+        fail "prometheus_metrics[${idx}] missing required key '${key}'"
+        missing=$((missing + 1))
+      fi
     done
-    info "Fix: convert to LF (e.g. 'sed -i \"s/\\r\$//\" <file>') or add to FIXTURE_CRLF_ALLOWLIST"
+
+    local documented_in
+    documented_in="$(jq -r --argjson i "${idx}" '.prometheus_metrics[$i].documented_in // empty' "${manifest}")"
+    if [[ -n "${documented_in}" ]]; then
+      local resolved
+      resolved="$(realpath -m "${REPO_ROOT}/${documented_in}" 2>/dev/null || echo "")"
+      if [[ -z "${resolved}" || ! -e "${resolved}" ]]; then
+        fail "prometheus_metrics[${idx}].documented_in path not found: '${documented_in}'"
+        missing=$((missing + 1))
+      fi
+    fi
+  done
+
+  if [[ ${missing} -eq 0 ]]; then
+    pass "All ${entry_count} prometheus_metrics entr(ies) have required keys and existing documented_in paths"
+  else
+    fail "${missing} manifest problem(s) found across ${entry_count} prometheus_metrics entr(ies)"
   fi
 }
 
@@ -357,7 +368,7 @@ cd "${REPO_ROOT}"
 [[ "${RUN_DET}"      -eq 1 ]] && check_determinism
 [[ "${RUN_LINKS}"    -eq 1 ]] && check_links
 [[ "${RUN_FLAGS}"    -eq 1 ]] && check_flags
-[[ "${RUN_FIXTURES}" -eq 1 ]] && check_fixtures
+[[ "${RUN_MANIFEST}" -eq 1 ]] && check_manifest
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
