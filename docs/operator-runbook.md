@@ -1,3 +1,89 @@
+# Operator Runbook: Setup Triage
+
+Use this procedure when a Glassbox command fails before it can analyze a
+transaction. Look up each error code in
+[troubleshooting-index.md](troubleshooting-index.md).
+
+## 1. Capture the failure
+
+```bash
+glassbox <command> ... 2> err.txt
+echo "exit=$?"
+sed -n 's/^Error: \([A-Z_]*\): .*/\1/p' err.txt | head -n1
+```
+
+| Exit | Meaning | Next step |
+|---|---|---|
+| 1 | User input | Fix the flag or argument named in the message |
+| 2 | Config / environment | Go to step 2; the code is `CONFIG_ERROR` or `SIMULATOR_NOT_FOUND` |
+| 3 | Internal / runtime | If the code is `RPC_*` or `ALL_RPC_FAILED`, go to step 2; otherwise file a bug with the bundle from step 3 |
+| 130 | Interrupted | Re-run |
+
+An `Error:` line without a code is a plain error. It still exits `3`; read
+the message.
+
+## 2. Run the environment check
+
+```bash
+glassbox doctor
+glassbox doctor --verbose     # adds resolved paths
+```
+
+Each line is `[OK]`, `[FAIL]`, or `[FAIL*]` (fixable), followed by a `→` hint
+on failure. For fixable items:
+
+```bash
+glassbox doctor --fix         # prompts before each fix
+glassbox doctor --fix --yes   # non-interactive (CI)
+```
+
+> **Automation note:** `glassbox doctor` exits `0` even when checks fail. It
+> reports problems in its output, not through its exit status. In CI, check
+> for `[FAIL` in the output:
+>
+> ```bash
+> glassbox doctor | tee doctor.txt
+> ! grep -q '\[FAIL' doctor.txt
+> ```
+
+### Doctor checks with an error code
+
+| Doctor check | Error code |
+|---|---|
+| Simulator Binary (glassbox-sim) | [`SIMULATOR_NOT_FOUND`](troubleshooting-index.md#simulator_not_found) |
+| TOML config | [`CONFIG_ERROR`](troubleshooting-index.md#config_error) |
+| RPC endpoint | [`RPC_CONNECTION_FAILED` / `RPC_TIMEOUT` / `ALL_RPC_FAILED`](troubleshooting-index.md#rpc_connection_failed-rpc_timeout-all_rpc_failed) |
+
+### Doctor checks without an error code
+
+These don't map to a stable code. Use the `→` hint `doctor` prints:
+
+| Check | Hint printed on failure |
+|---|---|
+| Go | `Install Go from https://go.dev/doc/install (requires Go 1.21+)`, or `go.mod requests <v> but installed <v>` |
+| Rust (rustc) | `Install Rust from https://rustup.rs/ ...` |
+| Cargo | `Cargo is included with Rust. Install from https://rustup.rs/` |
+| Cache directory (~/.Glassbox) | `Run 'Glassbox doctor --fix' to create cache directory` |
+| Protocol Registry | `Run 'Glassbox doctor --fix' to initialize protocol registry` |
+| Go Module Dependencies | `Run 'Glassbox doctor --fix' to resolve dependencies` |
+| Deep link (glassbox:// scheme) | Platform-specific steps, e.g. `Try: Glassbox install-scheme` |
+
+## 3. Escalate with a diagnostics bundle
+
+```bash
+glassbox doctor --bundle
+glassbox doctor --bundle --bundle-output ./glassbox-diag.gbdiag
+```
+
+The archive is redacted (no private keys or tokens); see
+[diagnostics-bundle.md](diagnostics-bundle.md). Attach it along with
+`err.txt` and the exit code from step 1.
+
+## 4. Saved sessions
+
+If the failure involves `glassbox session resume` / `load`, run
+`glassbox session doctor` and see
+[session-bookmarking.md](session-bookmarking.md#failure-paths).
 # Operator Runbook: RPC and Simulator Failures
 
 This runbook organises common failures by **symptom**, lists the **evidence to
@@ -13,19 +99,20 @@ a diagnostics bundle** for escalation.
 ## Table of Contents
 
 1. [RPC connection failures](#rpc-connection-failures)
-2. [RPC timeouts](#rpc-timeouts)
-3. [Transaction not found](#transaction-not-found)
-4. [Rate limiting](#rate-limiting)
-5. [Authentication errors](#authentication-errors)
-6. [Simulator binary not found](#simulator-binary-not-found)
-7. [Simulator crashes](#simulator-crashes)
-8. [Simulation logic errors](#simulation-logic-errors)
-9. [Source mapping failures](#source-mapping-failures)
-10. [Protocol version mismatch](#protocol-version-mismatch)
-11. [Snapshot corruption](#snapshot-corruption)
-12. [Session integrity failures](#session-integrity-failures)
-13. [Export failures](#export-failures)
-14. [Diagnostics bundle](#generating-a-diagnostics-bundle)
+2. [RPC failover recovery](#rpc-failover-recovery)
+3. [RPC timeouts](#rpc-timeouts)
+4. [Transaction not found](#transaction-not-found)
+5. [Rate limiting](#rate-limiting)
+6. [Authentication errors](#authentication-errors)
+7. [Simulator binary not found](#simulator-binary-not-found)
+8. [Simulator crashes](#simulator-crashes)
+9. [Simulation logic errors](#simulation-logic-errors)
+10. [Source mapping failures](#source-mapping-failures)
+11. [Protocol version mismatch](#protocol-version-mismatch)
+12. [Snapshot corruption](#snapshot-corruption)
+13. [Session integrity failures](#session-integrity-failures)
+14. [Export failures](#export-failures)
+15. [Diagnostics bundle](#generating-a-diagnostics-bundle)
 
 ---
 
@@ -58,17 +145,100 @@ glassbox config show --json | jq '.rpc_url'
    glassbox debug --rpc-url https://rpc.stellar.org --network testnet <tx-hash>
    ```
 3. **Check firewall rules** — ensure outbound HTTPS (443) is allowed.
-4. **Verify RPC token** — if using a private endpoint, confirm the token is
-   valid:
+4. **Verify RPC token** — if using a private endpoint, confirm a token is set
+   without printing any of it:
    ```sh
-   echo $GLASSBOX_RPC_TOKEN | head -c 8  # should print first 8 chars only
+   [ -n "$GLASSBOX_RPC_TOKEN" ] && echo "token set (${#GLASSBOX_RPC_TOKEN} chars)" || echo "token not set"
    ```
+   See [RPC bearer token examples](./rpc-token-examples.md).
 
 **When to escalate:** If the endpoint is reachable via `curl` but Glassbox
 cannot connect, generate a diagnostics bundle:
 
 ```sh
 glassbox doctor --bundle --bundle-output ./diag-connection.gbdiag
+```
+
+---
+
+## RPC failover recovery
+
+**Stable error code:** `ALL_RPC_FAILED`
+
+**Symptoms:**
+- `glassbox debug` fails with `all RPC endpoints failed` after trying multiple endpoints
+- The error output includes a `Provider failover summary` block listing each attempted endpoint and its failure cause
+- `glassbox rpc health` shows multiple endpoints with `[FAIL]` status
+
+**Evidence to collect:**
+
+```sh
+# Check configured endpoints
+glassbox config show --json | jq '.soroban_rpc_urls // .rpc_urls // .rpc_url'
+
+# Probe each endpoint's health
+glassbox rpc health
+
+# Check failover strategy
+glassbox config show --json | jq '.failover_strategy'
+
+# Check circuit breaker settings
+glassbox config show --json | jq '.failure_threshold, .retry_timeout'
+```
+
+**Safe remediation:**
+
+1. **Verify endpoint configuration** — ensure `soroban_rpc_urls` (or `rpc_urls` /
+   `rpc_url`) contains valid, reachable endpoints. Multiple endpoints enable
+   automatic failover.
+
+   ```toml
+   # glassbox.toml
+   soroban_rpc_urls = [
+     "https://soroban-testnet.stellar.org",
+     "https://rpc.example.com"
+   ]
+   failover_strategy = "weighted"  # or "sticky", "round_robin"
+   failure_threshold = 5           # consecutive failures before circuit opens
+   retry_timeout = 60              # seconds before re-probing a failed endpoint
+   ```
+
+   Or via environment:
+   ```sh
+   export GLASSBOX_SOROBAN_RPC_URLS="https://endpoint1.example.com,https://endpoint2.example.com"
+   export GLASSBOX_FAILOVER_STRATEGY="weighted"
+   ```
+
+2. **Check individual endpoint health** — use `glassbox rpc health` to probe each
+   configured endpoint and see latency/status:
+
+   ```sh
+   glassbox rpc health
+   # or with explicit URLs:
+   glassbox rpc health --rpc "https://endpoint1.example.com,https://endpoint2.example.com"
+   ```
+
+3. **Adjust failover strategy** — if traffic should prefer the fastest endpoint,
+   use `sticky`; for even distribution, use `round_robin`; for health-weighted
+   selection, use `weighted` (default).
+
+4. **Tune circuit breaker** — if endpoints recover slowly, increase
+   `retry_timeout`; if you want faster failover, decrease `failure_threshold`.
+
+5. **Pin a specific endpoint** — for reproducible debugging, use `--pin-endpoint`
+   to lock to a single RPC endpoint (disables silent failover):
+
+   ```sh
+   glassbox debug --pin-endpoint https://soroban-testnet.stellar.org --network testnet <tx-hash>
+   ```
+
+   Note: `--pin-endpoint` must match `--rpc-url` when both are provided.
+
+**When to escalate:** If all configured endpoints are healthy per `rpc health`
+but `debug` still fails, generate a diagnostics bundle:
+
+```sh
+glassbox doctor --bundle --bundle-output ./diag-failover.gbdiag
 ```
 
 ---
@@ -101,16 +271,40 @@ glassbox debug --show-metrics --network testnet <tx-hash>
    ```
 2. **Use a closer endpoint** — if on a different continent, try a regional
    endpoint.
-3. **Increase timeout** — set `request_timeout` in `glassbox.toml`:
+3. **Increase timeout** — set `request_timeout` in `glassbox.toml` (top-level,
+   not under `[rpc]`):
    ```toml
-   [rpc]
    request_timeout = 30  # seconds (default: 15)
+   ```
+   Or set the environment variable:
+   ```sh
+   export GLASSBOX_REQUEST_TIMEOUT=30
    ```
 4. **Check for slow calls** — `--show-metrics` highlights calls > 3 seconds
    with a remediation tip.
 
 **When to escalate:** If latency exceeds 5 seconds consistently, file an issue
 with the `--show-metrics` JSON output attached.
+
+**Verification:**
+
+```sh
+# Check current timeout configuration
+glassbox config show --json | jq '.request_timeout'
+
+# Test RPC latency manually
+time curl -s -X POST https://soroban-testnet.stellar.org \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+
+# Run debug with metrics to see RPC performance
+glassbox debug --show-metrics --network testnet <tx-hash>
+```
+
+**Test coverage:**
+- `internal/rpc/client_test.go` — `TestWithRequestTimeout_*` tests verify timeout configuration
+- `internal/rpc/failure_cause_test.go` — `TestClassifyFailureCause_*` tests verify timeout error classification
+- `internal/config/config_test.go` — `TestDefaultConfig_RequestTimeout`, `TestLoad_RequestTimeout*` tests verify config parsing
 
 ---
 
@@ -195,11 +389,13 @@ a misconfiguration. Generate a diagnostics bundle.
 **Evidence to collect:**
 
 ```sh
-# Check token is set (show first 8 chars only)
-echo "${GLASSBOX_RPC_TOKEN:0:8}..."
+# Check a token is set without printing any of it
+[ -n "$GLASSBOX_RPC_TOKEN" ] && echo "token set (${#GLASSBOX_RPC_TOKEN} chars)" || echo "token not set"
 
-# Verify token format (typically a JWT or opaque string)
-glassbox config show --json | jq '.rpc_token' | head -c 20
+# Check which source supplied the token (value is always "[redacted]")
+glassbox config show --json | jq '.values.rpc_token'
+# Expected: {"value": "[redacted]", "source": "environment"}  (or "file")
+# null means no token is configured from any source
 ```
 
 **Safe remediation:**
@@ -211,7 +407,9 @@ glassbox config show --json | jq '.rpc_token' | head -c 20
 
 **When to escalate:** If the token is valid for other tools but rejected by
 Glassbox, check for extra whitespace or newline characters in the environment
-variable.
+variable. Glassbox sends the value unchanged as `Authorization: Bearer <token>`.
+See [RPC bearer token examples](./rpc-token-examples.md) for safe ways to set
+and check the token.
 
 ---
 
@@ -238,6 +436,13 @@ glassbox doctor --verbose
 1. **Run doctor --fix:**
    ```sh
    glassbox doctor --fix
+   ```
+   In an interactive terminal, Glassbox asks before each fix. In CI or another
+   non-interactive environment, use `--yes` only when the job is authorized to
+   apply those fixes; without it, the command returns an error instead of
+   accepting the prompts automatically:
+   ```sh
+   glassbox --non-interactive doctor --fix --yes
    ```
 2. **Build manually:**
    ```sh
@@ -607,10 +812,11 @@ For reproducible offline debugging:
 | `SIMULATOR_CRASH` | Binary or memory issue | Rebuild simulator, reduce trace depth |
 | `SIMULATION_LOGIC_ERROR` | Contract or state issue | Check trace, budget, arguments |
 | `SOURCE_DISCOVERY_FAILED` | Missing source or symbols | Provide `--contract-source` |
-| `ALL_RPC_FAILED` | All endpoints down | Check provider status page |
+| `ALL_RPC_FAILED` | All endpoints down | Check `glassbox rpc health`, verify `soroban_rpc_urls` config |
 
 ## See also
 
+- [Troubleshooting index — Doctor symptom-to-check mapping](./troubleshooting-index.md#doctor-symptom-to-check-mapping) — complete mapping of symptoms to `glassbox doctor` checks
 - [Debug command](./debug-command.md) — full command reference
 - [Source mapping troubleshooting](./source-mapping-troubleshooting.md) — source mapping wizard
 - [Diagnostics bundle](./diagnostics-bundle.md) — portable diagnostics

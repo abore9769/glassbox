@@ -4,7 +4,58 @@ Glassbox can sign audit logs with either a software Ed25519 key or a PKCS#11
 hardware security module (HSM). This document covers setup, environment
 variables, platform-specific module paths, and troubleshooting.
 
-## Quick start
+## Signing provider flag reference
+
+The flag that selects the signing backend is `--signing-provider`. It has one deprecated alias.
+
+| Flag | Status | Values | Notes |
+|------|--------|--------|-------|
+| `--signing-provider` | **stable** (since 0.3) | `software`, `pkcs11` | Use this flag in all new scripts |
+| `--hsm-provider` | **deprecated** (since 0.3, removes in v2.0) | same values | Alias; accepted today but prints a warning |
+
+The environment variable mirror is `GLASSBOX_SIGNING_PROVIDER` (stable). Its deprecated counterpart is `GLASSBOX_SIGNER_TYPE`.
+
+### Successful path — software provider
+
+```bash
+glassbox audit:sign \
+  --signing-provider software \
+  --payload '{"input":{},"state":{},"events":[],"timestamp":"2026-01-01T00:00:00.000Z"}' \
+  --software-private-key "$(cat ./ed25519-private-key.pem)"
+# Expected: signed audit log JSON printed to stdout, exit 0
+```
+
+### Successful path — PKCS#11 provider
+
+```bash
+export GLASSBOX_PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
+export GLASSBOX_PKCS11_PIN=1234
+export GLASSBOX_PKCS11_KEY_LABEL=glassbox-audit-key
+
+glassbox audit:sign \
+  --signing-provider pkcs11 \
+  --payload '{"input":{},"state":{},"events":[],"timestamp":"2026-01-01T00:00:00.000Z"}'
+# Expected: signed audit log JSON printed to stdout, exit 0
+```
+
+### Failure path — deprecated flag warning
+
+```bash
+glassbox audit:sign --hsm-provider pkcs11 --validate-only \
+  --pkcs11-module /usr/lib/softhsm/libsofthsm2.so --pkcs11-pin 1234
+# stderr: warning: --hsm-provider is deprecated; use --signing-provider pkcs11 instead
+# The command still runs; use --signing-provider in new scripts.
+```
+
+### Failure path — unknown provider value
+
+```bash
+glassbox audit:sign --signing-provider kms --payload-file payload.json
+# Error: invalid --signing-provider "kms" — must be one of: software, pkcs11
+# Exit: 1 (VALIDATION_FAILED)
+```
+
+---
 
 ```bash
 # Software signing (Ed25519 PEM key)
@@ -46,6 +97,45 @@ Generate a key with OpenSSL:
 openssl genpkey -algorithm ed25519 -out ed25519-private-key.pem
 openssl pkey -in ed25519-private-key.pem -pubout -out ed25519-public-key.pem
 ```
+
+### Accepted key formats
+
+Glassbox accepts an Ed25519 key as PKCS#8 PEM (preferred) or as a hex-encoded
+seed/full key. When more than one source is set, the resolution order is
+`--software-private-key`, `GLASSBOX_AUDIT_PRIVATE_KEY_PEM`, then
+`GLASSBOX_SOFTWARE_PRIVATE_KEY_HEX`; PEM text or a readable PEM file path wins
+over hex.
+
+| Source | Accepted value |
+|--------|----------------|
+| `--software-private-key` | PKCS#8 PEM text beginning `-----BEGIN PRIVATE KEY-----`, or a readable path to such a file |
+| `GLASSBOX_AUDIT_PRIVATE_KEY_PEM` | Same as above |
+| `GLASSBOX_SOFTWARE_PRIVATE_KEY_HEX` | 64 hex characters (32-byte seed) or 128 hex characters (64-byte full key) |
+
+Check the generated PEM envelope before signing, then use the file path form:
+
+```bash
+head -n 1 ./ed25519-private-key.pem
+# -----BEGIN PRIVATE KEY-----
+
+glassbox audit:sign --signing-provider software --payload-file payload.json \
+  --software-private-key ./ed25519-private-key.pem
+# Expected: signed audit log JSON printed to stdout, exit 0
+```
+
+A hex seed works without a PEM file and is generated with OpenSSL:
+
+```bash
+export GLASSBOX_SOFTWARE_PRIVATE_KEY_HEX="$(openssl rand -hex 32)"
+glassbox audit:sign --signing-provider software --payload-file payload.json
+# Expected: signed audit log JSON printed to stdout, exit 0
+```
+
+`openssl rand -hex 32` produces the required 64 hex characters (32 bytes).
+The 128-character form is an existing 64-byte Ed25519 private key exported as
+hex (seed followed by its public key), not an independently generated value.
+A key with a different PEM header (`OPENSSH PRIVATE KEY`, `EC PRIVATE KEY`, or
+`RSA PRIVATE KEY`) is rejected; see the validation messages below.
 
 ### Software provider input validation
 
@@ -94,6 +184,11 @@ GLASSBOX_SOFTWARE_PRIVATE_KEY_HEX is not valid hexadecimal: ...
 ---
 
 ## PKCS#11 HSM signing
+
+> **Flag name:** Use `--signing-provider pkcs11`.
+> The flag `--hsm-provider` is **deprecated** since v0.3 and will be removed in v2.0.
+> Both flags are accepted today, but examples throughout this document use the current name.
+> See the [compatibility matrix](./compatibility-matrix.md#currently-deprecated-surfaces) for the removal timeline.
 
 ### Required environment variables
 
@@ -388,7 +483,8 @@ pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so \
 export GLASSBOX_PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
 export GLASSBOX_PKCS11_PIN=1234
 export GLASSBOX_PKCS11_KEY_LABEL=glassbox-audit-key
-glassbox audit:sign --hsm-provider pkcs11 --validate-only
+glassbox audit:sign --signing-provider pkcs11 --validate-only
+# Note: --hsm-provider is a deprecated alias for --signing-provider. Use --signing-provider.
 ```
 
 ---
@@ -414,7 +510,8 @@ export GLASSBOX_PKCS11_PIN=<your-pin>
 export GLASSBOX_PKCS11_KEY_LABEL="Private key for Digital Signature"
 
 # 5. Validate
-glassbox audit:sign --hsm-provider pkcs11 --validate-only
+glassbox audit:sign --signing-provider pkcs11 --validate-only
+# Note: --hsm-provider is a deprecated alias for --signing-provider. Use --signing-provider.
 ```
 
 ---
@@ -429,7 +526,7 @@ below is what a backend that can drive the module produces when every step
 passes.
 
 ```
-$ glassbox audit:sign --hsm-provider pkcs11 --validate-only
+$ glassbox audit:sign --signing-provider pkcs11 --validate-only
 
 Running PKCS#11 preflight checks...
 
@@ -555,6 +652,40 @@ key, which proves integrity but not that the signer was trusted.
 ---
 
 ## Troubleshooting
+
+### Slot and token matrix
+
+Use `--validate-only` to see exactly which slot/token check failed. Slot
+selection is controlled by `GLASSBOX_PKCS11_TOKEN_LABEL` (matched first,
+case-sensitive) and `GLASSBOX_PKCS11_SLOT` (used only when no token label is
+set; default `0`).
+
+| Preflight output | Meaning | Fix |
+|------------------|---------|-----|
+| `[FAIL] slot_enum  failed to enumerate slots: ...` | The module loaded but the slot list could not be read | Check the reader/daemon (`systemctl status pcscd`) and run `pkcs11-tool --module $GLASSBOX_PKCS11_MODULE --list-slots` |
+| `[FAIL] slot_enum  no slots with tokens found` | No token is present in any slot | Insert the token, or for SoftHSM2 run `softhsm2-util --init-token --slot 0 --label MyToken --pin 1234 --so-pin 0000` |
+| `[FAIL] slot_enum  no token with label "MyToken" found (checked N slot(s))` | `GLASSBOX_PKCS11_TOKEN_LABEL` matches no token label | List labels with `pkcs11-tool --list-slots`; labels are case-sensitive |
+| `[FAIL] slot_enum  slot index N is out of range (found M slot(s))` | `GLASSBOX_PKCS11_SLOT` is greater than or equal to the number of slots | Set `GLASSBOX_PKCS11_SLOT` to a value from `0` to `M-1`, or unset it to use slot `0` |
+| `GLASSBOX_PKCS11_SLOT must be a non-negative integer, got "not-a-number"` | Slot value is non-numeric or negative | Set a numeric index such as `0` or `1`, or unset the variable |
+| `[PASS] token_info  token info unavailable for slot N (non-fatal)` | Token metadata could not be read; signing can still proceed | Informational only — investigate if you expected a token label here |
+| `[FAIL] session_open  failed to open session on slot N: ...` | Another process holds an exclusive session, or the token is write-protected | Close other sessions and verify the token is not write-protected |
+
+A successful slot/token portion of the report looks like:
+
+```
+  [PASS] slot_enum      using slot index 0 (slot ID 0, 1 slot(s) total)
+  [PASS] token_info     token label: "glassbox-test" (slot 0)
+  [PASS] session_open   session opened on slot 0 (handle 1)
+```
+
+Repeatable check:
+
+```bash
+export GLASSBOX_PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
+export GLASSBOX_PKCS11_PIN=1234
+export GLASSBOX_PKCS11_KEY_LABEL=glassbox-audit-key
+glassbox audit:sign --signing-provider pkcs11 --validate-only
+```
 
 ### Module file not found
 
@@ -712,3 +843,12 @@ The following ADRs govern the design decisions behind audit signing:
 - [ADR-006: Provider Isolation](adr/006-provider-isolation.md) — documents the isolation properties of software, PKCS#11, and KMS providers; explains why only the hash digest crosses the provider boundary.
 - [ADR-005: Canonicalization Ownership](adr/005-canonicalization-ownership.md) — specifies the canonical form and hashing algorithm whose output is passed to the signing provider.
 - [ADR-007: Offline Guarantees](adr/007-offline-guarantees.md) — documents which providers work without network access and describes the air-gapped signing pipeline.
+
+---
+
+## See also
+
+- [Compatibility Matrix — CLI flags](./compatibility-matrix.md#1-cli-flags) — `--signing-provider` (stable) and `--hsm-provider` (deprecated) stability levels and removal timeline
+- [Audit Verify Command](./audit-verify-command.md) — verifying a signed log
+- [Audit KMS Signing](./audit-kms-signing.md) — AWS KMS signing integration
+- [Navigation map — Journey 3](./navigation-map.md#journey-3--sign-and-verify-an-audit-log) — full signing workflow overview

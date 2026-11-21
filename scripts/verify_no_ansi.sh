@@ -6,24 +6,24 @@
 set -e
 
 cd "$(dirname "$0")/.."
-BIN="./Glassbox"
+BIN="./glassbox"
 
 # Build if needed
-if [ ! -x "$BIN" ] && ! command -v Glassbox &>/dev/null; then
-  echo "Building Glassbox..."
-  go build -o Glassbox ./cmd/glassbox/
+if [ ! -x "$BIN" ] && ! command -v glassbox &>/dev/null; then
+  echo "Building glassbox..."
+  go build -o glassbox ./cmd/glassbox/
 fi
 if [ -x "$BIN" ]; then
-  : # use ./Glassbox
-elif command -v Glassbox &>/dev/null; then
+  : # use ./glassbox
+elif command -v glassbox &>/dev/null; then
   BIN="glassbox"
 else
-  echo "Error: Glassbox binary not found. Run: go build -o Glassbox ./cmd/glassbox/"
+  echo "Error: glassbox binary not found. Run: go build -o glassbox ./cmd/glassbox/"
   exit 1
 fi
 
 # Use a valid-length hash (64 hex chars) - will fail to fetch but we get initial output
-HASH="0"$(printf '0%.0s' {1..62})
+HASH=$(printf '0%.0s' {1..64})
 
 echo "Testing: $BIN debug $HASH 2>&1 | cat"
 OUTPUT=$($BIN debug "$HASH" 2>&1 | cat)

@@ -37,8 +37,51 @@ func init() {
 Naming rules:
 - Lowercase, hyphen-separated for multi-word commands (`simulate-upgrade`).
 - Hierarchical subcommands use a colon as the separator in `Use` (`audit:sign`), not a nested cobra subcommand, unless the group is large enough to warrant a parent group command.
-- Keep `Short` under 60 characters. `Long` is the place for full context, accepted values, environment variable names, and gotchas.
+- Keep `Short` under 60 characters (enforced by `TestAllCommandsHaveShortDescription`). `Long` is the place for full context, accepted values, environment variable names, and gotchas.
 - Always set `GroupID` — it controls where the command appears in `--help`.
+
+### Root persistent flags
+
+These flags are registered on the root command and inherited by its
+subcommands. Their defaults below are the values registered with Cobra; some
+flags document an automatic behavior when left at that default. Command-local
+flags are intentionally not included. Hidden internal flags are omitted.
+
+| Flag | Default | Purpose |
+|---|---:|---|
+| `--audit-log` | empty | Write a signed operation audit log |
+| `--audit-log-provider` | empty | Select the audit signing provider |
+| `--audit-log-software-private-key` | empty | Supply the software audit signing key |
+| `--audit-log-pkcs11-module` | empty | Set the PKCS#11 module path |
+| `--audit-log-pkcs11-pin` | empty | Supply the PKCS#11 PIN |
+| `--audit-log-pkcs11-token-label` | empty | Select the PKCS#11 token |
+| `--audit-log-pkcs11-key-label` | empty | Select the PKCS#11 key by label |
+| `--audit-log-pkcs11-key-id` | empty | Select the PKCS#11 key by hex ID |
+| `--audit-log-meta` | empty | Add audit metadata as `key=value` entries |
+| `--deterministic-seed` | empty | Set the deterministic replay seed |
+| `--deterministic` | `false` | Enable deterministic replay mode |
+| `--rpc-response-limit` | `0` | Set the response limit; `0` uses the 32 MiB default |
+| `--rpc-aggregate-limit` | `0` | Set the aggregate limit; `0` uses the 512 MiB default |
+| `--allow-untrusted-plugins` | `false` | Allow community and untrusted plugins to load |
+| `--timestamp` | `0` | Override the ledger header timestamp |
+| `--window` | `0` | Set the simulation time window in seconds |
+| `--profile` | `false` | Enable CPU and memory profiling |
+| `--profile-format` | `html` | Choose `html` or `svg` profile output |
+| `--log-level` | empty | Set log verbosity; empty leaves the configured level unchanged |
+| `--verbose` | `false` | Enable debug-level output |
+| `--no-color` | `false` | Disable ANSI color output |
+| `--non-interactive` | `false` | Disable prompts and terminal controls; CI and pipes are also detected |
+| `--telemetry` | `false` | Opt in to anonymized command usage telemetry |
+| `--telemetry-anonymized` | `true` | Send telemetry in anonymized mode |
+| `--version`, `-V` | `false` | Print the Glassbox version |
+
+For example, a root persistent flag can be used with a subcommand:
+
+```bash
+glassbox --no-color debug <transaction-hash>
+```
+
+Options such as `debug --network` belong to that command, not this table.
 
 ### Help text requirements
 
@@ -296,11 +339,97 @@ if tc.IsInteractive() {
 
 Non-interactive mode is auto-detected from CI environment variables and pipe/redirect detection. Users can also force it with `--non-interactive`. Your command gets this for free from `PersistentPreRunE` — just query `termctx.IsNonInteractive()` at the point where you would display interactive UI.
 
+Non-interactive mode does not mean “answer yes.” A command that needs
+confirmation either requires its explicit confirmation flag or returns an
+actionable error. Use the command-specific flag only when the job is intended
+to perform the operation:
+
+```bash
+glassbox --non-interactive cache clear --force
+glassbox --non-interactive doctor --fix --yes
+glassbox --non-interactive update --yes
+```
+
+`--force` authorizes cache deletion, `doctor --fix --yes` skips fix prompts,
+and `update --yes` proceeds with the update. Without those flags, non-interactive
+cache, doctor, and update confirmation paths fail rather than silently
+approving the action. See [cache eviction](cache-eviction.md) for cache-specific
+behavior.
+
 Color output follows the same pattern. Call `visualizer.SetNoColor(true)` only if you add a new color subsystem; all built-in helpers already check the global flag.
 
 ---
 
-## 8. Security considerations
+## 8. Accessibility and screen-reader compatibility
+
+Glassbox help text and status output must be legible to users who rely on
+screen readers or plain-text log capture. The rules below are enforced by
+`TestAllCommandsHaveShortDescription`, `TestCriticalCommandsHaveLongAndExample`,
+and `TestANSIRenderer_Symbols` in `internal/terminal/ansi_test.go`.
+
+### Help text structure
+
+- `Short` is a single sentence of ≤60 characters with no terminal punctuation.
+  It is the string a screen reader announces when tabbing through the command
+  list in `--help` output. Length is enforced by `TestAllCommandsHaveShortDescription`.
+- `Long` must be plain prose: no ANSI sequences, no raw Unicode emoji, and no
+  raw bullet glyphs. Use ASCII hyphens (`-`) for bullet lists so that every
+  terminal and screen reader renders them identically.
+- `Example` must use the literal command name as it appears in `Use`, not an
+  alias or a placeholder, so the announced text is actionable.
+
+### Status symbols and plain-text fallbacks
+
+`internal/terminal.Renderer.Symbol()` maps logical names to safe ASCII
+representations. When `IsTTY()` is false (non-interactive mode, CI, pipes,
+`NO_COLOR`, or `TERM=dumb`) every `Symbol()` call returns a plain ASCII
+string with no Unicode code points above U+007E. This is the string a screen
+reader or plain-text log consumer receives.
+
+The documented symbol-name → plain-text mapping is:
+
+| Symbol name | TTY output | Plain-text (non-TTY) |
+|-------------|-----------|----------------------|
+| `check`     | `[OK]`    | `[OK]`               |
+| `cross`     | `[FAIL]`  | `[X]`                |
+| `warn`      | `[!]`     | `[!]`                |
+| `arrow_r`   | `->`      | `->`                 |
+| `arrow_l`   | `<-`      | `<-`                 |
+| `target`    | `[TARGET]`| `>>`                 |
+| `pin`       | `*`       | `*`                  |
+| `wrench`    | `[TOOL]`  | `[*]`                |
+| `chart`     | `[STATS]` | `[#]`                |
+| `list`      | `[LIST]`  | `[.]`                |
+| `play`      | `[PLAY]`  | `>`                  |
+| `book`      | `[DOC]`   | `[?]`                |
+| `wave`      | `[HELLO]` | _(empty string — intentionally silent in non-TTY)_ |
+| `magnify`   | `[SEARCH]`| `[?]`                |
+| `logs`      | `[LOGS]`  | `[Logs]`             |
+| `events`    | `[NET]`   | `[Events]`           |
+
+The `wave` symbol is intentionally empty in non-TTY mode because it is used
+only for decorative greetings; callers that must produce output must use a
+different symbol. `TestSymbol_AllKnownNames` in `platform_tty_test.go`
+explicitly skips `wave` for this reason.
+
+The sentinel methods `Success()`, `Warning()`, and `Error()` always return a
+non-empty string regardless of TTY state — they are guaranteed non-empty by
+`TestSuccessWarningError_NeverEmptyOnAnyPlatform`.
+
+### Rules for new commands
+
+- Never call `fmt.Print*` with raw Unicode symbols or emoji. Use
+  `renderer.Symbol(name)` or the `Success()` / `Warning()` / `Error()` helpers
+  so that the plain-text fallback is applied automatically.
+- Never construct colored status prefixes inline with ANSI codes. The
+  `visualizer.Colorize` helper already gates on `ColorEnabled()`.
+- Do not place Unicode characters above U+007E in `Short`, `Long`, or `Example`
+  fields. The emojis.py script enforces this for the repository at large; the
+  same rule applies to command help strings.
+
+---
+
+## 9. Security considerations
 
 Before writing a new command, check:
 
@@ -315,7 +444,7 @@ The `--audit-log` path is for audit trail output, not for debug logs. Do not add
 
 ---
 
-## 9. Tests
+## 10. Tests
 
 Three layers of tests are required for every new command.
 
@@ -345,7 +474,7 @@ func TestMyCommand_ValidationError(t *testing.T) {
 
 ### Integration tests (`integration/`)
 
-Add a case to `TestErstBinaryFullCLISurface` for `mycommand --help`. Add a dedicated function for behavioral contracts:
+Add a `TestHelpSnapshot_Mycommand` case to `internal/cmd/help_snapshot_test.go` following the pattern of the existing snapshot tests (e.g. `TestHelpSnapshot_Debug`). Add a dedicated function for behavioral contracts:
 
 ```go
 func TestMyCommand_ExitCodeOnValidationFailure(t *testing.T) {
@@ -365,7 +494,7 @@ Follow `docs/regression-test-guide.md`. Create a fixture in `test/regression/fix
 
 ---
 
-## 10. Documentation
+## 11. Documentation
 
 A new command requires a documentation file at `docs/mycommand.md` before the PR merges. Minimum sections:
 
@@ -384,7 +513,7 @@ Add the command to the surface test in `integration/cli_surface_integration_test
 
 ---
 
-## 11. Release checklist
+## 12. Release checklist
 
 Before marking the PR ready for review, confirm:
 
@@ -398,10 +527,10 @@ Before marking the PR ready for review, confirm:
 - [ ] Non-interactive mode is handled (no spinners or prompts without a TTY check).
 - [ ] `--no-color` / `NO_COLOR` is respected via the global visualizer flag (no manual ANSI in new code).
 - [ ] Unit tests cover validation, success output, and error code.
-- [ ] Integration test covers `--help` and at least one error exit code.
+- [ ] Integration test covers `--help` (a `TestHelpSnapshot_Mycommand` case in `internal/cmd/help_snapshot_test.go`) and at least one error exit code.
 - [ ] `docs/mycommand.md` is present with all required sections.
 - [ ] New `ErstErrorCode`s are documented in `docs/stable-error-codes.md`.
-- [ ] `TestErstBinaryFullCLISurface` includes a `--help` case.
+- [ ] `TestHelpSnapshot_*` includes a `--help` case in `internal/cmd/help_snapshot_test.go`.
 - [ ] `docs/compatibility-matrix.md` updated for every new or changed CLI flag, JSON field, or Go export.
 - [ ] A changelog fragment added to `changelog/fragments/` (`make changelog-check` passes).
 - [ ] If any surface is deprecated or removed: migration note in `MIGRATION_GUIDE.md` and `breaking = true` in the fragment.

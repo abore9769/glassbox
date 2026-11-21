@@ -135,6 +135,9 @@ func (r *ANSIRenderer) Symbol(name string) string { //nolint:gocyclo // Large sw
 		case "check":
 			return "[OK]"
 		case "cross":
+			// Intentional TTY/non-TTY divergence: "[FAIL]" is more descriptive
+			// for terminal output; "[X]" is the compact form for plain-text logs.
+			// Documented in docs/no-color.md §"Symbol divergence between TTY and non-TTY modes".
 			return "[FAIL]"
 		case "warn":
 			return "[!]"
@@ -194,6 +197,11 @@ func (r *ANSIRenderer) Symbol(name string) string { //nolint:gocyclo // Large sw
 	case "book":
 		return "[?]"
 	case "wave":
+		// "wave" is intentionally empty in non-TTY mode: it is decorative only
+		// and must produce no output in plain-text, CI, or screen-reader contexts.
+		// Callers that need visible output must use a different symbol name.
+		// See docs/command-development-guide.md §8 and TestSymbol_AllKnownNames
+		// in platform_tty_test.go.
 		return ""
 	case "magnify":
 		return "[?]"
